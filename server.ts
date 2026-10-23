@@ -188,7 +188,9 @@ async function startServer() {
         }
       });
 
-      const text = await response.text();
+      const text =   await response.text();
+       
+console.log('[ACCOUNTS] Coinbase status:', response.status);
       try {
         const data = JSON.parse(text);
         if (data && data.accounts) {
@@ -242,7 +244,52 @@ async function startServer() {
     }
     res.json({ success: true, status: circuitState.isRunning ? 'running' : 'stopped' });
   });
+  const LIVE_TRADING = process.env.LIVE_TRADING === 'true';
+  const MAX_ORDER_USD = Number(process.env.MAX_ORDER_USD || 5);
 
+  app.post('/api/coinbase/order', async (req, res) => {
+    try {
+      const { pair, side, usdSize, baseSize } = req.body;
+      if (!/^[A-Z0-9]+-USD$/.test(pair) || !['BUY', 'SELL'].includes(side)) {
+        return res.status(400).json({ success: false, error: 'bad pair or side' });
+      }
+      if (side === 'BUY' && !(Number(usdSize) > 0 && Number(usdSize) <= MAX_ORDER_USD)) {
+        return res.status(400).json({ success: false, error: `usdSize must be 0-${MAX_ORDER_USD}` });
+      }
+      if (side === 'SELL' && !(Number(baseSize) > 0)) {
+        return res.status(400).json({ success: false, error: 'baseSize required' });
+      }
+      if (!circuitState.isRunning || circuitState.isCircuitTripped) {
+        return res.status(409).json({ success: false, error: 'trading paused by safety switch' });
+      }
+
+      const orderPath = LIVE_TRADING ? '/api/v3/brokerage/orders' : '/api/v3/brokerage/orders/preview';
+      const jwt = generateCDPJWT('POST', 'api.coinbase.com', orderPath);
+      if (!jwt) return res.status(500).json({ success: false, error: 'no credentials' });
+
+      const body = {
+        client_order_id: crypto.randomUUID(),
+        product_id: pair,
+        side,
+        order_configuration: {
+          market_market_ioc: side === 'BUY'
+            ? { quote_size: String(usdSize) }
+            : { base_size: String(baseSize) },
+        },
+      };
+
+      const r = await fetch(`https://api.coinbase.com${orderPath}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json();
+      console.log(`[ORDER ${LIVE_TRADING ? 'LIVE' : 'PREVIEW'}]`, pair, side, r.status);
+      res.status(r.ok ? 200 : 502).json({ success: r.ok, live: LIVE_TRADING, data });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
   // ==========================================
   // ⚡ VITE MIDDLEWARE
   // ==========================================
